@@ -1,0 +1,12 @@
+Kairos quick start
+
+From the repository root:
+  docker compose up --build
+
+Open http://localhost:8080 and choose Explore synthetic demo.
+The default demo needs no API keys and uses synthetic prices.
+
+Stop:
+  docker compose down
+
+For local Python/Node development and live-data configuration, see README.md.
