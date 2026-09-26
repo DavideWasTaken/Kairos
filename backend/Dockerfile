@@ -14,7 +14,7 @@ COPY . .
 EXPOSE 8000
 
 ENV PORT=8000 \
-    WORKERS=2 \
+    WORKERS=1 \
     LOG_LEVEL=info
 
-CMD ["sh", "-c", "exec uvicorn main:app --workers ${WORKERS:-2} --host 0.0.0.0 --port ${PORT:-8000} --log-level ${LOG_LEVEL:-info}"]
+CMD ["sh", "-c", "exec uvicorn main:app --workers ${WORKERS:-1} --host 0.0.0.0 --port ${PORT:-8000} --log-level ${LOG_LEVEL:-info}"]

@@ -1,4 +1,3 @@
-import json
 import logging
 import math
 import os
@@ -8,12 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import requests
 import yfinance as yf
+import ai_assistant
+import snapshot_store
+from snapshot_store import get_analysis_snapshot
 from insights import RECENT_INSIDER_WINDOW_DAYS, get_insider_activity
 
 logger = logging.getLogger(__name__)
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 _INDEX_ALIASES = {
     "nasdaq": "^IXIC",
@@ -809,6 +808,13 @@ def _compute_cap_segment_insider_activity(question: str) -> dict | None:
     }
 
 
+def _has_unsupported_historical_period(question: str) -> bool:
+    # These are lookback units, not return sampling frequency (e.g. daily returns).
+    amount = r'(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|un|uno|una|due|tre|quattro|cinque|sei|sette|otto|nove|dieci|undici|dodici|last|past|previous|ultim[oaie]|scors[oaie])'
+    unit = r'(?:days?|giorni|giorno|weeks?|wks?|settimane?|months?|mos?|mesi|mese)'
+    return bool(re.search(r'\b' + amount + r'\s*-?\s*(?:calendar\s+)?' + unit + r'\b', question or '', re.IGNORECASE))
+
+
 def _build_verified_facts(question: str, fallback_ticker: str | None, history: list[dict] | None = None) -> list[dict]:
     facts = []
     insider_scan = _compute_cap_segment_insider_activity(question)
@@ -820,10 +826,7 @@ def _build_verified_facts(question: str, fallback_ticker: str | None, history: l
     # Route facts deterministically. Optional model selection never changes numbers.
     is_return_query = _is_return_question(question) or (is_follow_up and _history_has_return_topic(history))
     is_correlation_query = _is_correlation_question(question)
-    if (is_return_query or is_correlation_query) and re.search(
-        r"\b\d+\s*-?\s*(days?|giorni|giorno|weeks?|wks?|settimane?|months?|mos?|mesi|mese)\b",
-        question or "", flags=re.IGNORECASE,
-    ):
+    if (is_return_query or is_correlation_query) and _has_unsupported_historical_period(question):
         return [{"metric": "historical_period_unsupported",
                  "reason": "Return and correlation queries currently support whole years only. Please specify a period in whole years."}]
     symbol = _extract_symbol_from_question(question, None)
@@ -895,6 +898,20 @@ def _fallback_verified_answer(question: str, facts: list[dict]) -> str:
         )
 
     f = facts[0]
+    if f.get("metric") == "asset_overview_unavailable":
+        return f"Please analyze {f.get('symbol')} with the {f.get('dcf_profile')} DCF profile first, then ask again. The server snapshot is missing or expired."
+    if f.get("metric") == "asset_overview":
+        values = f.get('results', {})
+        period = f.get('period_actual', {})
+        return (
+            f"Dashboard snapshot for {f.get('symbol')} ({f.get('dcf_profile')} DCF profile), captured {f.get('captured_at')}. "
+            f"Price observation window: {period.get('start_date')} -> {period.get('end_date')}. "
+            f"Current price {_format_metric(values.get('current_price'))}; "
+            f"DCF value per share {_format_metric(values.get('dcf_intrinsic_value_per_share'))}; "
+            f"RSI {_format_metric(values.get('rsi'), 1)}. "
+            f"Source: {f.get('data_source')}. Missing fields: {', '.join(f.get('missing_data') or []) or 'none'}. "
+            "DCF values are assumption-dependent estimates; missing values are not estimates."
+        )
     if f.get("metric") == "historical_period_unsupported":
         return f["reason"]
     if f.get("metric") == "cap_segment_insider_activity_unavailable":
@@ -989,81 +1006,127 @@ def _fallback_verified_answer(question: str, facts: list[dict]) -> str:
     )
 
 
-EXPLANATIONS = {
-    "returns": "CAGR describes compounded growth across the observed period. The mean calendar-year return averages the available yearly observations. Historical performance does not establish future performance.",
-    "correlation": "Correlation describes how daily returns moved together in the overlapping history. It does not establish causation and can change over time.",
-    "insiders": "The scan includes only explicitly identified purchases in the provider records. Disclosed purchase values may be incomplete, and the monitored universe is not the entire market.",
-    "unavailable": "The available provider data is insufficient to answer this request. Missing values are not estimates.",
+CLARIFICATIONS = {
+    'missing_asset': 'Please specify an asset ticker to analyze.',
+    'missing_period': 'Please specify the period in whole years.',
+    'missing_pair': 'Please specify two assets for the correlation calculation.',
+    'unsupported_period': 'Return and correlation queries currently support whole years only. Please specify a period in whole years.',
+    'unsupported_request': 'Please ask for one operation: historical returns, correlation, an insider scan, a dashboard overview, or a general financial concept.',
 }
 
 
-def _groq_explanation(question: str, facts: list[dict]) -> str | None:
-    """Let the model select vetted qualitative text; never render model-authored claims."""
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
-    if not api_key:
-        return None
-    metric = str((facts[0] if facts else {}).get("metric", ""))
-    allowed_key = (
-        "returns" if metric == "historical_return_stats" else
-        "correlation" if metric == "historical_correlation_stats" else
-        "insiders" if metric == "cap_segment_insider_activity" else "unavailable"
-    )
-    try:
-        response = requests.post(
-            GROQ_API_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": DEFAULT_GROQ_MODEL,
-                "messages": [
-                    {"role": "system", "content": (
-                        "Select a qualitative explanation for the supplied metric. Return ONLY a JSON object "
-                        "with the single key explanation_key. Allowed value for this metric: " + allowed_key +
-                        ". Do not return prose, numbers or additional keys."
-                    )},
-                    {"role": "user", "content": json.dumps({"question": question, "metric": metric})},
-                ],
-                "temperature": 0,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json() or {}
-        choices = payload.get("choices") or []
-        if not choices:
-            return None
-        content = (((choices[0] or {}).get("message") or {}).get("content") or "").strip()
-        selection = json.loads(content)
-        if not isinstance(selection, dict) or set(selection) != {"explanation_key"}:
-            return None
-        if selection["explanation_key"] != allowed_key:
-            return None
-        return EXPLANATIONS[allowed_key]
-    except Exception:
-        logger.warning("Optional explanation unavailable; deterministic answer retained.")
-        return None
+def _validate_request_alignment(plan, question):
+    """Protect explicit periods and recognizable symbols from an inconsistent plan."""
+    operation = plan['operation']
+    if operation in {'returns', 'correlation'}:
+        if _has_unsupported_historical_period(question):
+            raise ai_assistant.AIUnavailable('invalid_plan')
+        years = _extract_years_maybe(question)
+        if years is not None and years != plan['years']:
+            raise ai_assistant.AIUnavailable('invalid_plan')
+    if operation in {'returns', 'correlation', 'asset_overview'}:
+        # Mask compound symbols before the legacy loose-token extractor can split them.
+        compound_pattern = r'(?<![A-Za-z0-9])(?:\^[A-Z0-9.-]+|[A-Z0-9]+[.=-][A-Z0-9.-]+)(?![A-Za-z0-9])'
+        compounds = [match.group() for match in re.finditer(compound_pattern, question)
+                     if ai_assistant.valid_ticker(match.group())]
+        simple_question = re.sub(compound_pattern, ' ', question)
+        explicit = compounds + [symbol for symbol in _extract_symbols_from_question(simple_question)
+                                if symbol not in {'DCF', 'RSI', 'EPS', 'FCF', 'WACC', 'GDP', 'PE', 'AI'}]
+        planned = [plan['ticker_a'], plan['ticker_b']] if operation == 'correlation' else [plan['ticker']]
+        if explicit and any(symbol not in planned for symbol in explicit):
+            raise ai_assistant.AIUnavailable('invalid_plan')
+    if operation == 'insider_scan':
+        days = _extract_days_maybe(question)
+        segment = _extract_cap_segment(question)
+        exchange = _extract_exchange_filter(question)
+        if ((days is not None and days != plan['days']) or
+                (segment and segment[0] != plan['segment']) or
+                (exchange and exchange != plan['exchange'])):
+            raise ai_assistant.AIUnavailable('invalid_plan')
 
 
-def answer_financial_chat(question: str, ticker: str | None = None, history: list[dict] | None = None) -> dict:
-    user_q = (question or "").strip()
+def _execute_plan(plan, profile):
+    operation = plan['operation']
+    if operation == 'returns':
+        fact = _compute_verified_return_stats(plan['ticker'], plan['years'])
+        return [fact or {'metric': 'historical_return_stats_unavailable', 'symbol': plan['ticker'],
+                         'period_requested_years': plan['years'], 'data_source': 'Yahoo Finance via yfinance'}]
+    if operation == 'correlation':
+        fact = _compute_verified_correlation_stats(plan['ticker_a'], plan['ticker_b'], plan['years'])
+        return [fact or {'metric': 'historical_correlation_stats_unavailable', 'symbol_a': plan['ticker_a'],
+                         'symbol_b': plan['ticker_b'], 'period_requested_years': plan['years'], 'data_source': 'Yahoo Finance via yfinance'}]
+    if operation == 'insider_scan':
+        # Format only validated enums and a bounded integer for the existing deterministic scan.
+        query = f"top {plan['segment'].replace('_', ' ')} insider purchases {plan['exchange'] or ''} last {plan['days']} days"
+        return [_compute_cap_segment_insider_activity(query)]
+    if operation == 'asset_overview':
+        fact = get_analysis_snapshot(plan['ticker'], profile)
+        return [fact or {'metric': 'asset_overview_unavailable', 'symbol': plan['ticker'], 'dcf_profile': profile}]
+    return []
+
+
+def _commentary_evidence(facts):
+    """Remove provider prose and detailed rows from scan evidence before sending it."""
+    projected = []
+    for fact in facts:
+        if fact.get('metric') == 'cap_segment_insider_activity':
+            item = {key: fact[key] for key in ('id', 'metric', 'scope', 'window_days', 'window_conversion', 'definition', 'scan', 'universe_source', 'ranking_method', 'data_source') if key in fact}
+            item['results'] = [{key: row.get(key) for key in ('symbol', 'market_cap', 'purchase_count', 'purchase_shares', 'purchase_value', 'valued_purchase_count', 'latest_purchase_date')} for row in (fact.get('results') or [])[:5]]
+            projected.append(item)
+        else:
+            projected.append(fact)
+    return projected
+
+
+def answer_financial_chat(question: str, ticker: str | None = None, history: list[dict] | None = None,
+                          dcf_profile: str = 'base') -> dict:
+    user_q = (question or '').strip()[:4000]
+    history = ai_assistant.bounded_history(history)
+    demo = os.getenv('KAIROS_DEMO', '0').lower() in {'1', 'true', 'yes'}
+    capability = ai_assistant.ai_capability(demo=demo)
+    ai = {'status': capability['status'] if capability['status'] != 'configured' else 'unavailable',
+          'code': None, 'planning_status': 'skipped', 'commentary_status': 'skipped'}
+    result = {'answer': 'Please write a question.', 'explanation': None, 'explanation_kind': None,
+              'verified_facts': [], 'model': None, 'used_llm': False, 'ai': ai, 'evidence_ids': []}
     if not user_q:
-        return {
-            "answer": "Please write a question.",
-            "explanation": None,
-            "verified_facts": [],
-            "model": None,
-            "used_llm": False,
-        }
-
-    verified_facts = _build_verified_facts(user_q, ticker, history=history or [])
-    answer = _fallback_verified_answer(user_q, verified_facts)
-    explanation = _groq_explanation(user_q, verified_facts)
-    used_llm = explanation is not None
-    return {
-        "answer": answer,
-        "explanation": explanation,
-        "explanation_kind": "AI-selected predefined explanation" if used_llm else None,
-        "verified_facts": verified_facts,
-        "model": DEFAULT_GROQ_MODEL if used_llm else None,
-        "used_llm": used_llm,
-    }
+        return result
+    if demo:
+        from demo_data import demo_chat
+        return demo_chat(user_q, ticker or 'DEMO')
+    plan = None
+    if capability['status'] == 'configured':
+        try:
+            plan = ai_assistant.validate_plan(ai_assistant.request_json(ai_assistant.PLAN_PROMPT,
+                {'question': user_q, 'selected_ticker': ticker, 'dcf_profile': dcf_profile, 'history': history}))
+            _validate_request_alignment(plan, user_q)
+            ai.update(status='used', planning_status='used')
+            result.update(used_llm=True, model=ai_assistant.configured_model())
+        except ai_assistant.AIUnavailable as error:
+            ai.update(status='unavailable', code=error.code, planning_status='unavailable')
+            logger.warning('Optional AI planning unavailable (%s); deterministic answer retained.', error.code)
+            plan = None
+    facts = _execute_plan(plan, dcf_profile) if plan else _build_verified_facts(user_q, ticker, history=history)
+    facts = [dict(fact, id=f'fact-{index}') for index, fact in enumerate(facts, 1) if fact]
+    result['verified_facts'] = facts
+    operation = plan['operation'] if plan else None
+    if operation == 'clarify':
+        result['answer'] = CLARIFICATIONS[plan['reason']]
+    elif operation == 'concept':
+        result['answer'] = 'General concept explanation; no asset-specific numerical facts were requested or verified.'
+    else:
+        result['answer'] = _fallback_verified_answer(user_q, facts)
+    # No second attempt after a failed plan, clarification, or missing data.
+    has_evidence = bool(facts) and facts[0].get('metric') in {
+        'historical_return_stats', 'historical_correlation_stats', 'cap_segment_insider_activity', 'asset_overview'}
+    if plan and (has_evidence or operation == 'concept'):
+        try:
+            commentary = ai_assistant.request_json(ai_assistant.COMMENTARY_PROMPT,
+                {'question': user_q, 'history': history, 'operation': operation, 'facts': _commentary_evidence(facts)})
+            explanation, refs = ai_assistant.validate_commentary(commentary, facts)
+            result.update(explanation=explanation, evidence_ids=refs,
+                          explanation_kind='Unverified AI-generated interpretation')
+            ai['commentary_status'] = 'used'
+        except ai_assistant.AIUnavailable as error:
+            ai.update(status='partial', code=error.code, commentary_status='unavailable')
+            logger.warning('Optional AI commentary unavailable (%s); computed answer retained.', error.code)
+    return result

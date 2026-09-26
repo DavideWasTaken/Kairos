@@ -9,9 +9,9 @@ services:
       KAIROS_DEMO: ${KAIROS_DEMO:-1}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      WORKERS: ${BACKEND_WORKERS:-2}
+      WORKERS: ${BACKEND_WORKERS:-1}
       PORT: 8000
     healthcheck:
       test:

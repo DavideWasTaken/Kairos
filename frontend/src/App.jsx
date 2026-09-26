@@ -5,7 +5,7 @@ import CorrelationChart from './components/CorrelationChart';
 import OverviewSection from './components/OverviewSection';
 import InsightsPanel from './components/InsightsPanel';
 import AIChatPanel from './components/AIChatPanel';
-import { analyzeStock, fetchHealth } from './api';
+import { analyzeStock, fetchHealth, formatApiError } from './api';
 
 const DemoNotice = () => (
   <div role="status" className="my-3 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-xs text-amber-200">
@@ -20,7 +20,7 @@ const SECTION_TABS = [
   { id: 'technical', label: 'Technical Analysis' },
   { id: 'insiders', label: 'Insider Buys' },
   { id: 'news', label: 'News' },
-  { id: 'chat', label: 'AI Chat' },
+  { id: 'chat', label: 'Research Chat' },
 ];
 
 const AssetAvatar = ({ asset, ticker }) => {
@@ -55,12 +55,16 @@ function App() {
   const [dcfProfile, setDcfProfile] = useState('base');
   const [lastTicker, setLastTicker] = useState('');
   const [healthDemoMode, setHealthDemoMode] = useState(false);
+  const [aiCapability, setAiCapability] = useState(null);
   const demoMode = data?.demo_mode ?? healthDemoMode;
 
   useEffect(() => {
     let active = true;
     fetchHealth().then((health) => {
-      if (active) setHealthDemoMode(health.demo_mode === true);
+      if (active) {
+        setHealthDemoMode(health.demo_mode === true);
+        setAiCapability(health.ai || null);
+      }
     }).catch(() => {});
     return () => { active = false; };
   }, []);
@@ -80,7 +84,7 @@ function App() {
         setActiveSection('overview');
       }
     } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to fetch analysis');
+      setError(formatApiError(err, 'Failed to fetch analysis.'));
     } finally {
       setLoading(false);
     }
@@ -303,7 +307,7 @@ function App() {
         )}
 
         {activeSection === 'chat' && (
-          <AIChatPanel key={currentTicker} ticker={currentTicker} assetName={currentName} demoMode={demoMode} />
+          <AIChatPanel key={`${currentTicker}-${dcfProfile}`} ticker={currentTicker} assetName={currentName} demoMode={demoMode} aiCapability={aiCapability} dcfProfile={dcfProfile} />
         )}
 
         {activeSection !== 'seasonality' && activeSection !== 'overview' && activeSection !== 'chat' && (

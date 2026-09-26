@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 import pandas as pd
 import os
@@ -14,6 +14,8 @@ from market_data import get_market_data, search_ticker
 from analysis import find_best_match
 from insights import build_asset_insights
 from chat_engine import answer_financial_chat
+from ai_assistant import ai_capability
+from snapshot_store import save_analysis_snapshot
 from demo_data import demo_history, demo_insights, demo_search, demo_chat
 import logging
 
@@ -39,7 +41,7 @@ app.add_middleware(
 @app.get("/health")
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "demo_mode": DEMO_MODE}
+    return {"status": "ok", "demo_mode": DEMO_MODE, "ai": ai_capability(DEMO_MODE)}
 
 @app.get("/api/search")
 def search_assets(q: str = Query(..., min_length=1, max_length=100)):
@@ -52,11 +54,14 @@ def search_assets(q: str = Query(..., min_length=1, max_length=100)):
 
 
 class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     role: Literal["user", "assistant"]
     content: str = Field(max_length=2000)
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    dcf_profile: Literal["conservative", "base", "aggressive"] = "base"
     message: str = Field(min_length=1, max_length=4000)
     ticker: str | None = Field(default=None, max_length=30)
     history: list[ChatMessage] = Field(default_factory=list, max_length=8)
@@ -72,6 +77,7 @@ def financial_chat(req: ChatRequest):
             question=req.message,
             ticker=(req.ticker or "").strip().upper() or None,
             history=history,
+            dcf_profile=req.dcf_profile,
         )
     except Exception as e:
         logger.error("Chat failed: %s", type(e).__name__)
@@ -205,7 +211,7 @@ def analyze_stock(
                 confluence_level = "low"
         else:
             confluence_level = "n/a"
-        return {
+        response = {
             "ticker": ticker,
             "demo_mode": DEMO_MODE,
             "data_source": "Synthetic demo fixture" if DEMO_MODE else "Yahoo Finance via yfinance",
@@ -247,6 +253,9 @@ def analyze_stock(
             },
             "best_match": best_match,
         }
+
+        save_analysis_snapshot(ticker, dcf_profile, response)
+        return response
 
     except HTTPException:
         raise

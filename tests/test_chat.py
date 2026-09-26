@@ -63,36 +63,6 @@ class ChatTests(unittest.TestCase):
         self.assertAlmostEqual(result["results"]["mean_calendar_year_return_pct"], 10.0)
         self.assertEqual(result["results"]["calendar_year_samples"], 1)
 
-    def _answer(self, content=None, failure=False):
-        response = Mock()
-        response.json.return_value = {"choices": [{"message": {"content": content}}]}
-        response.raise_for_status.side_effect = RuntimeError("secret-token") if failure else None
-        with patch.dict("os.environ", {"GROQ_API_KEY": "test-only-key"}), patch.object(chat_engine, "_build_verified_facts", return_value=FACTS), patch.object(chat_engine.requests, "post", return_value=response):
-            return chat_engine.answer_financial_chat("Return for TEST over 5 years")
-
-    def test_model_cannot_replace_deterministic_numeric_answer(self):
-        result = self._answer('{"explanation_key":"returns"}')
-        self.assertEqual(result["answer"], chat_engine._fallback_verified_answer("", FACTS))
-        self.assertTrue(result["used_llm"])
-        self.assertIsNotNone(result["explanation"])
-        self.assertIsNotNone(result["model"])
-
-    def test_unstructured_and_extra_numeric_model_claims_are_rejected(self):
-        for output in ["CAGR is 999%", "CAGR is nine hundred percent", '{"explanation_key":"returns", "claim":"999%"}', '{"explanation_key":"invented"}']:
-            with self.subTest(output=output):
-                result = self._answer(output)
-                self.assertEqual(result["answer"], chat_engine._fallback_verified_answer("", FACTS))
-                self.assertIsNone(result["explanation"])
-                self.assertFalse(result["used_llm"])
-
-    def test_model_failure_reports_no_llm_use_and_no_secret(self):
-        with self.assertLogs("chat_engine", level="WARNING") as captured:
-            result = self._answer(failure=True)
-        self.assertFalse(result["used_llm"])
-        self.assertIsNone(result["model"])
-        self.assertNotIn("secret-token", str(result))
-        self.assertNotIn("secret-token", " ".join(captured.output))
-
     def test_fact_routing_never_calls_a_classifier(self):
         with patch.dict("os.environ", {"GROQ_API_KEY": "test-only-key"}), patch.object(chat_engine.requests, "post", side_effect=AssertionError("unexpected model request")), patch.object(chat_engine, "_compute_verified_return_stats", return_value=FACTS[0]):
             self.assertEqual(chat_engine._build_verified_facts("Average return for TEST over 5 years", "TEST"), FACTS)

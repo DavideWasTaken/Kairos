@@ -55,7 +55,8 @@ def demo_insights(history, profile="base"):
 
 def demo_chat(question, symbol="DEMO"):
     result = {"answer": "", "explanation": None, "verified_facts": [],
-              "used_llm": False, "model": None, "demo_mode": True}
+              "used_llm": False, "model": None, "demo_mode": True, "evidence_ids": [],
+              "ai": {"status": "demo", "code": None, "planning_status": "skipped", "commentary_status": "skipped"}}
     if any(word in question.lower() for word in ("insider", "news", "dcf", "fundamental")):
         result["answer"] = "These data are unavailable in the synthetic demo. Try return statistics or correlation."
         return result
@@ -81,5 +82,5 @@ def demo_chat(question, symbol="DEMO"):
                             "total_return_pct": total * 100, "cagr_pct": cagr * 100}}
         answer = f"Synthetic {symbol}: total return {total:.2%}; CAGR {cagr:.2%}."
     result["answer"] = answer + f" Demo always uses the full fixture ({period['start_date']} to {period['end_date']}), regardless of the requested timeframe. No live data or AI call."
-    result["verified_facts"] = [fact]
+    result["verified_facts"] = [dict(fact, id="fact-1")]
     return result

@@ -44,6 +44,14 @@ Market-segment scans disclose the scanned universe and its source. A curated fal
 
 Supported requests route to deterministic data retrieval and calculations. Responses expose the actual observation period, source and structured metrics. Numerical text is formatted directly from those metrics; missing values appear as unavailable.
 
-An optional model call may select the matching predefined qualitative explanation. Only the expected JSON key and allowed value are accepted; other prose or claims are discarded. `used_llm` is true only when a valid explanation is accepted. It is a constrained explanation selector, not a general investment adviser.
+When AI is configured, a structured plan selects one supported operation and its parameters. The backend validates the plan before calling the existing calculations. Arbitrary functions, executable code and model-supplied URLs are not accepted. A rejected plan or provider failure uses the deterministic fallback where possible.
+
+For asset summaries, context comes from a recent server-generated analysis snapshot keyed by asset and DCF profile. It includes data provenance, capture time, observation dates and unavailable inputs. Snapshot capture time is not the time of the underlying quote or financial statement. No client-supplied financial snapshot is accepted as evidence.
+
+A second optional request generates commentary from selected evidence records. Responses must reference existing record IDs and meet output-shape limits. This validates structure and references, not the truth of every generated sentence. Commentary is displayed separately as fallible AI interpretation; it cannot overwrite the numerical answer or original facts. `used_llm` is true when a plan or commentary was accepted, so it can be true even when no commentary is available.
+
+General educational explanations have no verified source records and must not claim asset-specific facts. Return and correlation requests support integer-year periods; shorter explicit units require clarification. Insider windows use the disclosed day-based conversions.
+
+The key is read only by the backend. Missing credentials cause no model calls; configured credentials are not proactively tested. Authentication errors, unavailable models, rate limits, timeouts and invalid outputs are reported with safe status codes. No autonomous tool loop is used: each turn permits at most one planning and one commentary call.
 
 The demo supports fixture returns and correlation over the full fixed fixture period. It explicitly reports that period rather than pretending to satisfy arbitrary live-data timeframes. Fundamentals, news and insider requests are unavailable in the demo.
